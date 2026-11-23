@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <link rel="stylesheet" href="styles.css">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+</head>
+<body>
+  <h1 class="clase-titulo">
+    Hola Mundo. Me llamo Alejandro.
+  </h1>
+  <p class="clase-parrafo" id="parrafo-llm">
+    Acá va a aparecer el texto que recibimos de nuestro servidor. 
+  </p>
+  <button id="boton-accionador">
+    ACEPTAR
+  </button>
+  <input type="Ingrese Texto" id="input-prompt">
+  <a href="https://www.google.com">Ir a google.com</a>
+  <img src="" alt="">
+  <script>
+    const parrafo = document.getElementById("parrafo-llm");
+    let primerMensaje = true;
+
+    const cargarHistorial = async () => {
+      try {
+        const res = await fetch("http://localhost:8000/mensajes/");
+        const mensajes = await res.json();
+        if (mensajes.length === 0) return;
+        parrafo.textContent = "";
+        primerMensaje = false;
+        mensajes.sort((a, b) => a.id - b.id).forEach((mensaje, i) => {
+          if (i > 0) parrafo.append(document.createElement("br"));
+          const autor = mensaje.rol === "usuario" ? "Usuario" : "IA";
+          parrafo.append(`${autor}: ${mensaje.texto}`);
+        });
+      } catch (error) {
+        console.error("No se pudo cargar el historial:", error);
+      }
+    };
+
+    cargarHistorial();
+
+    document.getElementById("boton-accionador").onclick = async () => {
+      const prompt = document.getElementById("input-prompt").value;
+      const res = await fetch("http://localhost:8000/chat/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ texto: prompt })
+      })
+      const datos = await res.json()
+      if (primerMensaje) {
+        parrafo.textContent = ""
+        primerMensaje = false
+      } else {
+        parrafo.append(document.createElement("br"), document.createElement("br"))
+      }
+      parrafo.append(`Usuario: ${prompt}`, document.createElement("br"), `IA: ${datos.Respuesta}`)
+    }
+    
+    </script>
+</body>
+</html>

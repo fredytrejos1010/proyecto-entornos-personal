@@ -1,0 +1,31 @@
+# Entorno virtual y Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Variables y secretos
+.env
+.env.*
+!.env.example
+
+# Bases de datos locales
+# *.db
+*.sqlite
+*.sqlite3
+
+# Archivos generados y registros
+*.log
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+
+# Metadatos de Windows/WSL
+*:Zone.Identifier
+Thumbs.db
+.DS_Store
+
+# Editores e IDE
+.vscode/
+.idea/
