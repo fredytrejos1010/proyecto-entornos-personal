@@ -43,6 +43,8 @@ fastapi dev main.py
 
 La API estará disponible en <http://127.0.0.1:8000>. Puedes consultar y probar sus endpoints en <http://127.0.0.1:8000/docs>.
 
-## Abrir la interfaz
+## Iniciar la interfaz con Live Server
 
-Deja el servidor ejecutándose y abre `index.html` en tu navegador. Puedes hacerlo desde el explorador de archivos.
+Con la extensión **Live Server** instalada en VS Code, abre `index.html`, haz clic derecho dentro del archivo y selecciona **Open with Live Server** (o usa el botón **Go Live** en la barra inferior de VS Code). Esto abrirá la interfaz en el navegador.
+
+Deja también ejecutándose el servidor de FastAPI para que la interfaz pueda comunicarse con la API.
