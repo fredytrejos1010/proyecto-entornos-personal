@@ -9,6 +9,10 @@ from sqlmodel import Field, Session, SQLModel, create_engine, select
 from datetime import datetime, timezone
 
 
+# ---------------------------------------------------------------------------
+# Modelos y conexión a la base de datos
+# ---------------------------------------------------------------------------
+
 class Mensaje(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     rol: str
@@ -28,6 +32,11 @@ sqlite_url = f"sqlite:///{sqlite_file_name}"
 connect_args = {"check_same_thread": False}
 engine = create_engine(sqlite_url, connect_args=connect_args)
 
+
+# ---------------------------------------------------------------------------
+# Creación de tablas y sesión por petición
+# ---------------------------------------------------------------------------
+
 def create_db_and_tables():
     SQLModel.metadata.create_all(engine)
 
@@ -38,7 +47,10 @@ def get_session():
 
 SessionDep = Annotated[Session, Depends(get_session)]
 
-# Code above omitted 👆
+
+# ---------------------------------------------------------------------------
+# Aplicación
+# ---------------------------------------------------------------------------
 
 app = FastAPI()
 
@@ -59,13 +71,15 @@ app.add_middleware(
 
 client = genai.Client()
 
+
+# ---------------------------------------------------------------------------
+# Endpoints principales (recorrido de la exposición)
+# ---------------------------------------------------------------------------
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
-class MensajeEntrada(SQLModel):
-    texto: str
-    conversacion_id: int
 
 @app.get("/conversaciones/")
 def listar_conversaciones(session: SessionDep) -> list[Conversacion]:
@@ -82,33 +96,12 @@ def crear_conversacion(conversacion: Conversacion, session: SessionDep):
     return nueva
 
 
-class ConversacionActualizacion(SQLModel):
-    nombre_conversacion: str
+class MensajeEntrada(SQLModel):
+    texto: str
+    conversacion_id: int
 
 
-@app.patch("/conversaciones/{conversacion_id}")
-def renombrar_conversacion(
-    conversacion_id: int,
-    datos: ConversacionActualizacion,
-    session: SessionDep,
-):
-    conversacion = session.get(Conversacion, conversacion_id)
-    if not conversacion:
-        raise HTTPException(status_code=404, detail="Conversación no encontrada")
-    conversacion.nombre_conversacion = datos.nombre_conversacion
-    session.add(conversacion)
-    session.commit()
-    session.refresh(conversacion)
-    return conversacion
-
-
-@app.get("/conversaciones/{conversacion_id}/mensajes/")
-def mensajes_conversacion(conversacion_id: int, session: SessionDep):
-    return session.exec(
-        select(Mensaje).where(Mensaje.conversacion_id == conversacion_id)
-    ).all()
-
-@app.post("/chat/") # cambiar a POST
+@app.post("/chat/")
 def llamar_ia(mensaje: MensajeEntrada, session: SessionDep):
     # la conversación debe existir para poder guardar y consultar su contexto
     conversacion = session.get(Conversacion, mensaje.conversacion_id)
@@ -151,6 +144,14 @@ def llamar_ia(mensaje: MensajeEntrada, session: SessionDep):
     session.refresh(respuesta)
     return {"Respuesta": inferencia.output_text }
 
+
+@app.get("/conversaciones/{conversacion_id}/mensajes/")
+def mensajes_conversacion(conversacion_id: int, session: SessionDep):
+    return session.exec(
+        select(Mensaje).where(Mensaje.conversacion_id == conversacion_id)
+    ).all()
+
+
 # va a ser necesario definir un endpoint GET que me permita obtener TODOS los mensajes
 @app.get("/mensajes/")
 def leer_mensajes(
@@ -160,3 +161,45 @@ def leer_mensajes(
 ) -> list[Mensaje]:
     mensajes = session.exec(select(Mensaje).offset(offset).limit(limit)).all()
     return mensajes
+
+
+# ---------------------------------------------------------------------------
+# Material de respaldo: endpoints adicionales de la interfaz
+# (no forman parte del recorrido principal de la exposición)
+# ---------------------------------------------------------------------------
+
+class ConversacionActualizacion(SQLModel):
+    nombre_conversacion: str
+    conversacion_id: int
+
+
+@app.patch("/conversaciones/")
+def renombrar_conversacion(conversacion_name: ConversacionActualizacion, session: SessionDep):
+    conversacion_db = session.get(Conversacion, conversacion_name.conversacion_id)
+    if not conversacion_db:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+    conversacion = Conversacion(id=conversacion_name.conversacion_id, nombre_conversacion=conversacion_name.nombre_conversacion)
+    conversacion_data = conversacion.model_dump(exclude_unset=True)
+    conversacion_db.sqlmodel_update(conversacion_data)
+    session.add(conversacion_db)
+    session.commit()
+    session.refresh(conversacion_db)
+    return conversacion_db
+
+
+@app.delete("/conversaciones/{conversacion_id}")
+def eliminar_conversacion(conversacion_id: int, session: SessionDep):
+    conversacion = session.get(Conversacion, conversacion_id)
+    if not conversacion:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+
+    # Primero se eliminan los mensajes para no dejar registros huérfanos.
+    mensajes = session.exec(
+        select(Mensaje).where(Mensaje.conversacion_id == conversacion_id)
+    ).all()
+    for mensaje in mensajes:
+        session.delete(mensaje)
+
+    session.delete(conversacion)
+    session.commit()
+    return {"detail": "Conversación eliminada", "id": conversacion_id}

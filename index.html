@@ -63,24 +63,259 @@
 
     let conversaciones = [];
     let conversacionActual = null;
+    let conversacionEditandoId = null;
+    let conversacionEliminandoId = null;
     let cargaActual = 0;
 
     /* ---------- Utilidades de render ---------- */
 
-    // Convierte **texto** en negrilla sin usar innerHTML (así el texto sigue siendo seguro).
-    const resaltarNegrillas = (texto) => {
-      const fragmento = document.createDocumentFragment();
-      const partes = String(texto ?? "").split(/(\*\*[\s\S]+?\*\*)/g);
-      partes.forEach((parte) => {
-        if (parte.startsWith("**") && parte.endsWith("**") && parte.length > 4) {
-          const negrilla = document.createElement("strong");
-          negrilla.className = "texto-negrilla";
-          negrilla.textContent = parte.slice(2, -2);
-          fragmento.append(negrilla);
-        } else if (parte) {
-          fragmento.append(parte);
-        }
+    // Escapa el texto para que el HTML que venga en la inferencia nunca se ejecute.
+    const escaparHTML = (texto) =>
+      String(texto ?? "")
+        .replace(/\u0000/g, "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+
+    const esUrlSegura = (url) => /^(https?:\/\/|mailto:|\/|#)/i.test(url.trim());
+
+    // Formato en línea: `código`, **negrita**, *cursiva*, ~~tachado~~ y [enlaces](url).
+    const formatearEnLinea = (textoCrudo) => {
+      const codigos = [];
+      let texto = escaparHTML(textoCrudo).replace(/`([^`\n]+)`/g, (_, codigo) => {
+        codigos.push(codigo);
+        return `\u0000${codigos.length - 1}\u0000`;
       });
+
+      texto = texto.replace(
+        /\[([^\]\n]+)\]\(((?:[^()\s]|\([^()\s]*\))+)\)/g,
+        (original, etiqueta, url) => {
+          if (!esUrlSegura(url)) return etiqueta;
+          return `<a href="${url}" target="_blank" rel="noopener noreferrer">${etiqueta}</a>`;
+        }
+      );
+
+      texto = texto
+        .replace(/\*\*([^*\n]+?)\*\*/g, "<strong>$1</strong>")
+        .replace(/__([^_\n]+?)__/g, "<strong>$1</strong>")
+        .replace(/~~([^~\n]+?)~~/g, "<del>$1</del>")
+        .replace(/(^|[^\w*])\*([^*\s](?:[^*\n]*[^*\s])?)\*(?!\*)/g, "$1<em>$2</em>")
+        .replace(/(^|[^\w])_([^_\s](?:[^_\n]*[^_\s])?)_(?!\w)/g, "$1<em>$2</em>");
+
+      return texto.replace(/\u0000(\d+)\u0000/g, (_, indice) => `<code>${codigos[Number(indice)]}</code>`);
+    };
+
+    const coincidenciaLista = (linea) => {
+      const match = linea.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+      if (!match) return null;
+      return {
+        sangria: match[1].replace(/\t/g, "    ").length,
+        tipo: /^\d/.test(match[2]) ? "ol" : "ul",
+        numero: parseInt(match[2], 10),
+        texto: match[3]
+      };
+    };
+
+    // Arma listas (incluidas las anidadas) a partir de los items recolectados.
+    const construirLista = (items, inicio, sangria) => {
+      const tipo = items[inicio].tipo;
+      let html = tipo === "ol" ? `<ol start="${items[inicio].numero || 1}">` : "<ul>";
+      let i = inicio;
+
+      while (i < items.length) {
+        const item = items[i];
+        if (item.sangria < sangria) break;
+        if (item.sangria === sangria && item.tipo !== tipo) break;
+        if (item.sangria > sangria) {
+          const anidada = construirLista(items, i, item.sangria);
+          html += anidada.html;
+          i = anidada.siguiente;
+          continue;
+        }
+
+        html += `<li>${formatearEnLinea(item.texto)}`;
+        i++;
+
+        if (i < items.length && items[i].sangria > sangria) {
+          const anidada = construirLista(items, i, items[i].sangria);
+          html += anidada.html;
+          i = anidada.siguiente;
+        }
+        html += "</li>";
+      }
+
+      html += tipo === "ol" ? "</ol>" : "</ul>";
+      return { html, siguiente: i };
+    };
+
+    const esSeparadorTabla = (linea) =>
+      /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(linea);
+
+    const celdasTabla = (linea) =>
+      linea.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((celda) => celda.trim());
+
+    // Convierte markdown a HTML seguro (todo el texto se escapa antes de formatear).
+    const renderizarMarkdown = (textoCrudo) => {
+      const lineas = String(textoCrudo ?? "").replace(/\r\n?/g, "\n").split("\n");
+      let html = "";
+      let parrafo = [];
+      let itemsLista = [];
+
+      const cerrarParrafo = () => {
+        if (!parrafo.length) return;
+        html += `<p>${parrafo.map(formatearEnLinea).join("<br>")}</p>`;
+        parrafo = [];
+      };
+
+      const cerrarLista = () => {
+        if (!itemsLista.length) return;
+        let indice = 0;
+        while (indice < itemsLista.length) {
+          const resultado = construirLista(itemsLista, indice, itemsLista[indice].sangria);
+          html += resultado.html;
+          if (resultado.siguiente <= indice) break;
+          indice = resultado.siguiente;
+        }
+        itemsLista = [];
+      };
+
+      let i = 0;
+      while (i < lineas.length) {
+        const linea = lineas[i];
+        const lineaTrim = linea.trim();
+
+        // Bloques de código con ```
+        const inicioCodigo = lineaTrim.match(/^```([\w+#.-]*)\s*$/);
+        if (inicioCodigo) {
+          cerrarParrafo();
+          cerrarLista();
+          const lenguaje = inicioCodigo[1].replace(/[^\w+#.-]/g, "");
+          const codigo = [];
+          i++;
+          while (i < lineas.length && !/^```\s*$/.test(lineas[i].trim())) {
+            codigo.push(lineas[i]);
+            i++;
+          }
+          i++; // salta la línea de cierre
+          const clase = lenguaje ? ` class="language-${lenguaje}"` : "";
+          html += `<pre><code${clase}>${escaparHTML(codigo.join("\n"))}</code></pre>`;
+          continue;
+        }
+
+        if (!lineaTrim) {
+          cerrarParrafo();
+          cerrarLista();
+          i++;
+          continue;
+        }
+
+        // Separador horizontal
+        if (/^([-*_])\1{2,}$/.test(lineaTrim)) {
+          cerrarParrafo();
+          cerrarLista();
+          html += "<hr>";
+          i++;
+          continue;
+        }
+
+        // Títulos
+        const titulo = lineaTrim.match(/^(#{1,6})\s+(.+?)\s*#*$/);
+        if (titulo) {
+          cerrarParrafo();
+          cerrarLista();
+          const nivel = titulo[1].length;
+          html += `<h${nivel}>${formatearEnLinea(titulo[2])}</h${nivel}>`;
+          i++;
+          continue;
+        }
+
+        // Citas
+        if (/^>\s?/.test(lineaTrim)) {
+          cerrarParrafo();
+          cerrarLista();
+          const cita = [];
+          while (i < lineas.length && /^>\s?/.test(lineas[i].trim())) {
+            cita.push(lineas[i].trim().replace(/^>\s?/, ""));
+            i++;
+          }
+          html += `<blockquote>${renderizarMarkdown(cita.join("\n"))}</blockquote>`;
+          continue;
+        }
+
+        // Tablas
+        if (lineaTrim.includes("|") && i + 1 < lineas.length && esSeparadorTabla(lineas[i + 1])) {
+          cerrarParrafo();
+          cerrarLista();
+          const encabezado = celdasTabla(linea);
+          const alineaciones = celdasTabla(lineas[i + 1]).map((celda) => {
+            const izquierda = celda.startsWith(":");
+            const derecha = celda.endsWith(":");
+            if (izquierda && derecha) return "center";
+            if (derecha) return "right";
+            if (izquierda) return "left";
+            return "";
+          });
+          i += 2;
+
+          const filas = [];
+          while (i < lineas.length && lineas[i].trim() && lineas[i].includes("|")) {
+            filas.push(celdasTabla(lineas[i]));
+            i++;
+          }
+
+          const alineacionCelda = (indice) => {
+            const alineacion = alineaciones[indice];
+            return alineacion ? ` style="text-align:${alineacion}"` : "";
+          };
+          const th = encabezado
+            .map((celda, indice) => `<th${alineacionCelda(indice)}>${formatearEnLinea(celda)}</th>`)
+            .join("");
+          const tbody = filas
+            .map((fila) => `<tr>${encabezado
+              .map((_, indice) => `<td${alineacionCelda(indice)}>${formatearEnLinea(fila[indice] ?? "")}</td>`)
+              .join("")}</tr>`)
+            .join("");
+
+          html += `<div class="tabla-markdown"><table><thead><tr>${th}</tr></thead><tbody>${tbody}</tbody></table></div>`;
+          continue;
+        }
+
+        // Listas
+        const item = coincidenciaLista(linea);
+        if (item) {
+          cerrarParrafo();
+          itemsLista.push(item);
+          i++;
+          continue;
+        }
+
+        if (itemsLista.length) {
+          if (/^\s+/.test(linea) && lineaTrim) {
+            // Línea de continuación del último item.
+            itemsLista[itemsLista.length - 1].texto += ` ${lineaTrim}`;
+            i++;
+            continue;
+          }
+          cerrarLista();
+        }
+
+        // Párrafos
+        parrafo.push(lineaTrim);
+        i++;
+      }
+
+      cerrarParrafo();
+      cerrarLista();
+      return html;
+    };
+
+    const crearFragmentoMarkdown = (texto) => {
+      const contenedor = document.createElement("div");
+      contenedor.innerHTML = renderizarMarkdown(texto);
+      const fragmento = document.createDocumentFragment();
+      fragmento.append(...Array.from(contenedor.childNodes));
       return fragmento;
     };
 
@@ -98,9 +333,9 @@
       etiqueta.className = "mensaje-autor";
       etiqueta.textContent = autor;
 
-      const contenido = document.createElement("span");
+      const contenido = document.createElement("div");
       contenido.className = "mensaje-texto";
-      contenido.append(resaltarNegrillas(texto));
+      contenido.append(crearFragmentoMarkdown(texto));
 
       burbuja.append(etiqueta, contenido);
       fila.append(burbuja);
@@ -137,16 +372,246 @@
     const renderizarLista = () => {
       listaConversaciones.textContent = "";
       conversaciones.forEach((conv) => {
+        const activa = conv.id === conversacionActual?.id;
+        const editando = conv.id === conversacionEditandoId;
+        const eliminando = conv.id === conversacionEliminandoId;
+
+        const fila = document.createElement("div");
+        fila.className =
+          "conversacion-fila" +
+          (activa ? " activa" : "") +
+          (editando ? " editando" : "") +
+          (eliminando ? " confirmando" : "");
+
+        // Confirmación en línea antes de eliminar.
+        if (eliminando) {
+          const texto = document.createElement("span");
+          texto.className = "conversacion-confirmar-texto";
+          texto.textContent = "¿Eliminar?";
+          texto.title = conv.nombre;
+
+          const botonEliminar = document.createElement("button");
+          botonEliminar.type = "button";
+          botonEliminar.className = "conversacion-accion eliminar";
+          botonEliminar.textContent = "✓";
+          botonEliminar.title = "Sí, eliminar";
+          botonEliminar.setAttribute("aria-label", `Eliminar conversación ${conv.nombre}`);
+
+          const botonCancelar = document.createElement("button");
+          botonCancelar.type = "button";
+          botonCancelar.className = "conversacion-accion cancelar";
+          botonCancelar.textContent = "✕";
+          botonCancelar.title = "Cancelar";
+          botonCancelar.setAttribute("aria-label", "Cancelar eliminación");
+
+          botonEliminar.addEventListener("click", () => eliminarConversacion(conv, botonEliminar));
+          botonCancelar.addEventListener("click", cancelarEliminacionConversacion);
+
+          fila.append(texto, botonEliminar, botonCancelar);
+          listaConversaciones.append(fila);
+          return;
+        }
+
+        // Modo edición: input en el mismo lugar, con guardar y cancelar.
+        if (editando) {
+          const entrada = document.createElement("input");
+          entrada.type = "text";
+          entrada.className = "conversacion-entrada";
+          entrada.value = conv.nombre;
+          entrada.maxLength = 80;
+          entrada.title = "Presiona Enter para guardar o Esc para cancelar";
+          entrada.setAttribute("aria-label", "Nuevo nombre de la conversación");
+
+          const botonGuardar = document.createElement("button");
+          botonGuardar.type = "button";
+          botonGuardar.className = "conversacion-accion guardar";
+          botonGuardar.textContent = "✓";
+          botonGuardar.title = "Guardar nombre";
+          botonGuardar.setAttribute("aria-label", "Guardar nombre");
+
+          const botonCancelar = document.createElement("button");
+          botonCancelar.type = "button";
+          botonCancelar.className = "conversacion-accion cancelar";
+          botonCancelar.textContent = "✕";
+          botonCancelar.title = "Cancelar";
+          botonCancelar.setAttribute("aria-label", "Cancelar cambio de nombre");
+
+          const confirmar = () => guardarNombreConversacion(conv, entrada, botonGuardar);
+
+          botonGuardar.addEventListener("click", confirmar);
+          botonCancelar.addEventListener("click", cancelarEdicionConversacion);
+          entrada.addEventListener("input", () => {
+            entrada.classList.remove("error");
+            entrada.removeAttribute("aria-invalid");
+          });
+          entrada.addEventListener("keydown", (evento) => {
+            if (evento.key === "Enter") {
+              evento.preventDefault();
+              confirmar();
+            } else if (evento.key === "Escape") {
+              evento.preventDefault();
+              cancelarEdicionConversacion();
+            }
+          });
+
+          fila.append(entrada, botonGuardar, botonCancelar);
+          listaConversaciones.append(fila);
+          return;
+        }
+
         const item = document.createElement("button");
         item.type = "button";
-        item.className =
-          "conversacion-item" +
-          (conv.id === conversacionActual?.id ? " activa" : "");
+        item.className = "conversacion-item" + (activa ? " activa" : "");
         item.textContent = conv.nombre;
         item.title = conv.nombre;
         item.addEventListener("click", () => seleccionarConversacion(conv.id));
-        listaConversaciones.append(item);
+
+        const botonRenombrar = document.createElement("button");
+        botonRenombrar.type = "button";
+        botonRenombrar.className = "conversacion-renombrar";
+        botonRenombrar.textContent = "✎";
+        botonRenombrar.title = "Cambiar nombre";
+        botonRenombrar.setAttribute("aria-label", `Cambiar nombre de ${conv.nombre}`);
+        botonRenombrar.addEventListener("click", (evento) => {
+          evento.stopPropagation();
+          iniciarEdicionConversacion(conv);
+        });
+
+        const botonEliminar = document.createElement("button");
+        botonEliminar.type = "button";
+        botonEliminar.className = "conversacion-eliminar";
+        botonEliminar.textContent = "🗑";
+        botonEliminar.title = "Eliminar conversación";
+        botonEliminar.setAttribute("aria-label", `Eliminar conversación ${conv.nombre}`);
+        botonEliminar.addEventListener("click", (evento) => {
+          evento.stopPropagation();
+          iniciarEliminacionConversacion(conv);
+        });
+
+        fila.append(item, botonRenombrar, botonEliminar);
+        listaConversaciones.append(fila);
       });
+    };
+
+    const iniciarEdicionConversacion = (conv) => {
+      conversacionEliminandoId = null;
+      conversacionEditandoId = conv.id;
+      renderizarLista();
+
+      const entrada = listaConversaciones.querySelector(".conversacion-entrada");
+      if (entrada) {
+        entrada.focus();
+        entrada.select();
+      }
+    };
+
+    const cancelarEdicionConversacion = () => {
+      if (conversacionEditandoId === null) return;
+      conversacionEditandoId = null;
+      renderizarLista();
+    };
+
+    // Guarda el nuevo nombre usando el endpoint PATCH existente.
+    const guardarNombreConversacion = async (conv, entrada, botonGuardar) => {
+      const nombre = entrada.value.trim();
+
+      if (!nombre) {
+        entrada.classList.add("error");
+        entrada.setAttribute("aria-invalid", "true");
+        entrada.focus();
+        return;
+      }
+
+      if (nombre === conv.nombre) {
+        cancelarEdicionConversacion();
+        return;
+      }
+
+      entrada.readOnly = true;
+      botonGuardar.disabled = true;
+
+      try {
+        const res = await fetch(`${API}/conversaciones/`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            nombre_conversacion: nombre,
+            conversacion_id: conv.id
+          })
+        });
+        if (!res.ok) throw new Error(`Error ${res.status}`);
+
+        const actualizada = await res.json();
+        conv.nombre = actualizada.nombre_conversacion || nombre;
+        if (conversacionActual?.id === conv.id) {
+          tituloConversacion.textContent = conv.nombre;
+        }
+        if (conversacionEditandoId === conv.id) {
+          conversacionEditandoId = null;
+        }
+        renderizarLista();
+      } catch (error) {
+        console.error("No se pudo cambiar el nombre de la conversación:", error);
+        mostrarError("No se pudo cambiar el nombre. Verifica que el servidor esté encendido.");
+        entrada.readOnly = false;
+        botonGuardar.disabled = false;
+        entrada.focus();
+      }
+    };
+
+    const iniciarEliminacionConversacion = (conv) => {
+      conversacionEditandoId = null;
+      conversacionEliminandoId = conv.id;
+      renderizarLista();
+    };
+
+    const cancelarEliminacionConversacion = () => {
+      if (conversacionEliminandoId === null) return;
+      conversacionEliminandoId = null;
+      renderizarLista();
+    };
+
+    // Elimina la conversación y todos sus mensajes (el backend los borra en cascada).
+    const eliminarConversacion = async (conv, botonEliminar) => {
+      botonEliminar.disabled = true;
+
+      try {
+        const res = await fetch(`${API}/conversaciones/${conv.id}`, {
+          method: "DELETE"
+        });
+        if (!res.ok) throw new Error(`Error ${res.status}`);
+
+        const indice = conversaciones.findIndex((c) => c.id === conv.id);
+        const eraActiva = conversacionActual?.id === conv.id;
+        if (indice !== -1) conversaciones.splice(indice, 1);
+        if (conversacionEliminandoId === conv.id) conversacionEliminandoId = null;
+
+        if (eraActiva) {
+          conversacionActual = null;
+          localStorage.removeItem(CLAVE_ACTIVA);
+        }
+
+        if (!conversaciones.length) {
+          tituloConversacion.textContent = "Chat con IA";
+          limpiarMensajes();
+          await crearConversacion();
+          return;
+        }
+
+        if (eraActiva) {
+          const siguiente =
+            conversaciones[Math.min(Math.max(indice, 0), conversaciones.length - 1)];
+          seleccionarConversacion(siguiente.id);
+        } else {
+          renderizarLista();
+        }
+      } catch (error) {
+        console.error("No se pudo eliminar la conversación:", error);
+        mostrarError("No se pudo eliminar la conversación. Verifica que el servidor esté encendido.");
+        botonEliminar.disabled = false;
+      }
     };
 
     /* ---------- Carga de mensajes ---------- */
@@ -183,6 +648,8 @@
       const conv = conversaciones.find((c) => c.id === id);
       if (!conv) return;
 
+      conversacionEditandoId = null;
+      conversacionEliminandoId = null;
       conversacionActual = conv;
       localStorage.setItem(CLAVE_ACTIVA, String(id));
       tituloConversacion.textContent = conv.nombre;
@@ -232,12 +699,15 @@
       renderizarLista();
 
       // Persistir el nombre en el servidor (si falla, el chat sigue funcionando).
-      fetch(`${API}/conversaciones/${conversacionId}`, {
+      fetch(`${API}/conversaciones/`, {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({ nombre_conversacion: nombre })
+        body: JSON.stringify({
+          nombre_conversacion: nombre,
+          conversacion_id: conversacionId
+        })
       }).catch((error) => {
         console.error("No se pudo renombrar la conversación:", error);
       });
